@@ -187,7 +187,7 @@
                 targetfile="${build.src.gen-java}/org/apache/cassandra/cli/Cli.tokens"/>
     </target>
 
-    <target name="gen-cli-grammar" depends="check-gen-cli-grammar" unless="cliUpToDate">
+    <target name="gen-cli-grammar" depends="maven-ant-tasks-retrieve-build,check-gen-cli-grammar" unless="cliUpToDate">
       <echo>Building Grammar ${build.src.java}/org/apache/cassandra/cli/Cli.g  ....</echo>
       <java classname="org.antlr.Tool"
         classpath="${build.dir.lib}/jars/antlr-3.5.2.jar;${build.lib}/antlr-runtime-3.5.2.jar;${build.lib}/stringtemplate-4.0.2.jar"
@@ -209,7 +209,7 @@
                 targetfile="${build.src.gen-java}/org/apache/cassandra/cql3/Cql.tokens"/>
     </target>
  
-    <target name="gen-cql3-grammar" depends="check-gen-cql3-grammar" unless="cql3current">
+    <target name="gen-cql3-grammar" depends="maven-ant-tasks-retrieve-build,check-gen-cql3-grammar" unless="cql3current">
       <echo>Building Grammar ${build.src.java}/org/apache/cassandra/cql3/Cql.g  ...</echo>
       <java classname="org.antlr.Tool"
             classpath="${build.dir.lib}/jars/antlr-3.5.2.jar;${build.lib}/antlr-runtime-3.5.2.jar;${build.lib}/stringtemplate-4.0.2.jar"

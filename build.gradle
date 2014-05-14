@@ -1,0 +1,9 @@
+ant.importBuild 'build.xml'
+
+defaultTasks 'jar'
+
+
+tasks["gen-cli-grammar"].doFirst {
+  println ant.properties['build.lib']
+}
+
