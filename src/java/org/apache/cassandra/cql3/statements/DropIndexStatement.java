@@ -26,17 +26,20 @@ import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.MigrationManager;
-import org.apache.cassandra.transport.messages.ResultMessage;
+import org.apache.cassandra.transport.Event;
 
 public class DropIndexStatement extends SchemaAlteringStatement
 {
     public final String indexName;
     public final boolean ifExists;
 
-    public DropIndexStatement(String indexName, boolean ifExists)
+    // initialized in announceMigration()
+    private String indexedCF;
+
+    public DropIndexStatement(IndexName indexName, boolean ifExists)
     {
-        super(new CFName());
-        this.indexName = indexName;
+        super(indexName.getCfName());
+        this.indexName = indexName.getIdx();
         this.ifExists = ifExists;
     }
 
@@ -54,20 +57,21 @@ public class DropIndexStatement extends SchemaAlteringStatement
         // validated in findIndexedCf()
     }
 
-    public ResultMessage.SchemaChange.Change changeType()
+    public Event.SchemaChange changeEvent()
     {
         // Dropping an index is akin to updating the CF
-        return ResultMessage.SchemaChange.Change.UPDATED;
+        return new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, keyspace(), columnFamily());
     }
 
-    public void announceMigration() throws InvalidRequestException, ConfigurationException
+    public void announceMigration(boolean isLocalOnly) throws InvalidRequestException, ConfigurationException
     {
         CFMetaData cfm = findIndexedCF();
         if (cfm == null)
             return;
 
         CFMetaData updatedCfm = updateCFMetadata(cfm);
-        MigrationManager.announceColumnFamilyUpdate(updatedCfm, false);
+        indexedCF = updatedCfm.cfName;
+        MigrationManager.announceColumnFamilyUpdate(updatedCfm, false, isLocalOnly);
     }
 
     private CFMetaData updateCFMetadata(CFMetaData cfm)
@@ -105,5 +109,12 @@ public class DropIndexStatement extends SchemaAlteringStatement
                 return column;
         }
         return null;
+    }
+
+    @Override
+    public String columnFamily()
+    {
+        assert indexedCF != null;
+        return indexedCF;
     }
 }

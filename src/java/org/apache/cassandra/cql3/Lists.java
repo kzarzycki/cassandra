@@ -19,7 +19,6 @@ package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -119,7 +118,7 @@ public abstract class Lists
         }
     }
 
-    public static class Value extends Term.Terminal
+    public static class Value extends Term.MultiItemTerminal
     {
         public final List<ByteBuffer> elements;
 
@@ -150,9 +149,26 @@ public abstract class Lists
         {
             return CollectionSerializer.pack(elements, elements.size(), options.getProtocolVersion());
         }
+
+        public boolean equals(ListType lt, Value v)
+        {
+            if (elements.size() != v.elements.size())
+                return false;
+
+            for (int i = 0; i < elements.size(); i++)
+                if (lt.elements.compare(elements.get(i), v.elements.get(i)) != 0)
+                    return false;
+
+            return true;
+        }
+
+        public List<ByteBuffer> getElements()
+        {
+            return elements;
+        }
     }
 
-    /*
+    /**
      * Basically similar to a Value, but with some non-pure function (that need
      * to be evaluated at execution time) in it.
      *
@@ -202,6 +218,9 @@ public abstract class Lists
         }
     }
 
+    /**
+     * A marker for List values and IN relations
+     */
     public static class Marker extends AbstractMarker
     {
         protected Marker(int bindIndex, ColumnSpecification receiver)
@@ -214,7 +233,6 @@ public abstract class Lists
         {
             ByteBuffer value = options.getValues().get(bindIndex);
             return value == null ? null : Value.fromSerialized(value, (ListType)receiver.type, options.getProtocolVersion());
-
         }
     }
 

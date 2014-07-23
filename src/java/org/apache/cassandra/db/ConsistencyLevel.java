@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.google.common.collect.Iterables;
+import net.nicoulaj.compilecommand.annotations.Inline;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -244,6 +245,7 @@ public enum ConsistencyLevel
         }
     }
 
+    @Inline
     public void assureSufficientLiveNodes(Keyspace keyspace, Iterable<InetAddress> liveEndpoints) throws UnavailableException
     {
         int blockFor = blockFor(keyspace);
@@ -251,6 +253,10 @@ public enum ConsistencyLevel
         {
             case ANY:
                 // local hint is acceptable, and local node is always live
+                break;
+            case LOCAL_ONE:
+                if (countLocalEndpoints(liveEndpoints) == 0)
+                    throw new UnavailableException(this, 1, 0);
                 break;
             case LOCAL_QUORUM:
                 int localLive = countLocalEndpoints(liveEndpoints);
@@ -343,7 +349,7 @@ public enum ConsistencyLevel
     public void validateCounterForWrite(CFMetaData metadata) throws InvalidRequestException
     {
         if (this == ConsistencyLevel.ANY)
-            throw new InvalidRequestException("Consistency level ANY is not yet supported for counter columnfamily " + metadata.cfName);
+            throw new InvalidRequestException("Consistency level ANY is not yet supported for counter table " + metadata.cfName);
 
         if (isSerialConsistency())
             throw new InvalidRequestException("Counter operations are inherently non-serializable");

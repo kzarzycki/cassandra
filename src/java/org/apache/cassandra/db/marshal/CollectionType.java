@@ -61,6 +61,9 @@ public abstract class CollectionType<T> extends AbstractType<T>
     public abstract List<ByteBuffer> serializedValues(List<Cell> cells);
 
     @Override
+    public abstract CollectionSerializer<T> getSerializer();
+
+    @Override
     public String toString()
     {
         StringBuilder sb = new StringBuilder();
@@ -83,11 +86,6 @@ public abstract class CollectionType<T> extends AbstractType<T>
         {
             throw new MarshalException(String.format("cannot parse '%s' as hex bytes", source), e);
         }
-    }
-
-    public void validate(ByteBuffer bytes)
-    {
-        valueComparator().validate(bytes);
     }
 
     @Override

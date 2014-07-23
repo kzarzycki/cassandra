@@ -25,8 +25,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.*;
 
-import com.google.common.collect.Iterables;
-
 import org.apache.cassandra.db.Cell;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
@@ -130,7 +128,7 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
         if(comparator instanceof AbstractCompositeType)
             setTupleValue(pair, 0, composeComposite((AbstractCompositeType)comparator,colName));
         else
-            setTupleValue(pair, 0, cassandraToObj(comparator, col.name().toByteBuffer()));
+            setTupleValue(pair, 0, cassandraToObj(comparator, colName));
 
         // value
         Map<ByteBuffer,AbstractType> validators = getValidatorMap(cfDef);
@@ -530,7 +528,7 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
                     properties.setProperty(signature, sb.toString());
                 }
                 else
-                    throw new IOException(String.format("Column family '%s' not found in keyspace '%s'",
+                    throw new IOException(String.format("Table '%s' not found in keyspace '%s'",
                                                              column_family,
                                                              keyspace));
             }
@@ -788,8 +786,15 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
     {
         if (validator instanceof DecimalType || validator instanceof InetAddressType)
             return validator.getString(value);
-        else
-            return validator.compose(value);
+
+        if (validator instanceof CollectionType)
+        {
+            // For CollectionType, the compose() method assumes the v3 protocol format of collection, which
+            // is not correct here since we query using the CQL-over-thrift interface which use the pre-v3 format
+            return ((CollectionSerializer)validator.getSerializer()).deserializeForNativeProtocol(value, 1);
+        }
+
+        return validator.compose(value);
     }
 
     protected static class CfInfo

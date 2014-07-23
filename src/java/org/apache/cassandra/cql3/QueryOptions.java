@@ -61,6 +61,11 @@ public abstract class QueryOptions
         return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT, 3);
     }
 
+    public static QueryOptions forInternalCalls(List<ByteBuffer> values)
+    {
+        return new DefaultQueryOptions(ConsistencyLevel.ONE, values, false, SpecificOptions.DEFAULT, 3);
+    }
+
     public static QueryOptions fromPreV3Batch(ConsistencyLevel consistency)
     {
         return new DefaultQueryOptions(consistency, Collections.<ByteBuffer>emptyList(), false, SpecificOptions.DEFAULT, 2);
@@ -105,8 +110,6 @@ public abstract class QueryOptions
      */
     public abstract int getProtocolVersion();
 
-    public abstract QueryOptions withProtocolVersion(int version);
-
     // Mainly for the sake of BatchQueryOptions
     abstract SpecificOptions getSpecificOptions();
 
@@ -132,11 +135,6 @@ public abstract class QueryOptions
             this.skipMetadata = skipMetadata;
             this.options = options;
             this.protocolVersion = protocolVersion;
-        }
-
-        public QueryOptions withProtocolVersion(int version)
-        {
-            return new DefaultQueryOptions(consistency, values, skipMetadata, options, version);
         }
 
         public ConsistencyLevel getConsistency()
@@ -199,11 +197,6 @@ public abstract class QueryOptions
         {
             wrapped.prepare(specs);
             return this;
-        }
-
-        public QueryOptions withProtocolVersion(int version)
-        {
-            return new DefaultQueryOptions(getConsistency(), getValues(), skipMetadata(),  getSpecificOptions(), version);
         }
     }
 
@@ -278,14 +271,15 @@ public abstract class QueryOptions
             TIMESTAMP,
             NAMES_FOR_VALUES;
 
+            private static final Flag[] ALL_VALUES = values();
+
             public static EnumSet<Flag> deserialize(int flags)
             {
                 EnumSet<Flag> set = EnumSet.noneOf(Flag.class);
-                Flag[] values = Flag.values();
-                for (int n = 0; n < values.length; n++)
+                for (int n = 0; n < ALL_VALUES.length; n++)
                 {
                     if ((flags & (1 << n)) != 0)
-                        set.add(values[n]);
+                        set.add(ALL_VALUES[n]);
                 }
                 return set;
             }

@@ -53,7 +53,7 @@ public class Memtable
     private static final Logger logger = LoggerFactory.getLogger(Memtable.class);
 
     static final MemtablePool MEMORY_POOL = DatabaseDescriptor.getMemtableAllocatorPool();
-    private static final int ROW_OVERHEAD_HEAP_SIZE;
+    private static final int ROW_OVERHEAD_HEAP_SIZE = estimateRowOverhead(Integer.valueOf(System.getProperty("cassandra.memtable_row_overhead_computation_step", "100000")));
 
     private final MemtableAllocator allocator;
     private final AtomicLong liveDataSize = new AtomicLong(0);
@@ -157,8 +157,6 @@ public class Memtable
         {
             // if the writeBarrier is set, we want to maintain lastReplayPosition; this is an optimisation to avoid
             // casing it for every write, but still ensure it is correct when writeBarrier.await() completes.
-            // we clone the replay position so that the object passed in does not "escape", permitting stack allocation
-            replayPosition = replayPosition.clone();
             while (true)
             {
                 ReplayPosition last = lastReplayPosition.get();
@@ -302,11 +300,6 @@ public class Memtable
                                     * 1.2); // bloom filter and row index overhead
         }
 
-        protected Directories.DataDirectory getWriteableLocation()
-        {
-            return cfs.directories.getFlushLocation();
-        }
-
         public long getExpectedWriteSize()
         {
             return estimatedSize;
@@ -394,14 +387,13 @@ public class Memtable
         }
     }
 
-    static
+    private static int estimateRowOverhead(final int count)
     {
         // calculate row overhead
         final OpOrder.Group group = new OpOrder().start();
         int rowOverhead;
         MemtableAllocator allocator = MEMORY_POOL.newAllocator();
         ConcurrentNavigableMap<RowPosition, Object> rows = new ConcurrentSkipListMap<>();
-        final int count = 100000;
         final Object val = new Object();
         for (int i = 0 ; i < count ; i++)
             rows.put(allocator.clone(new BufferDecoratedKey(new LongToken((long) i), ByteBufferUtil.EMPTY_BYTE_BUFFER), group), val);
@@ -411,6 +403,6 @@ public class Memtable
         rowOverhead += AtomicBTreeColumns.EMPTY_SIZE;
         allocator.setDiscarding();
         allocator.setDiscarded();
-        ROW_OVERHEAD_HEAP_SIZE = rowOverhead;
+        return rowOverhead;
     }
 }

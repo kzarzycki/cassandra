@@ -19,6 +19,8 @@ package org.apache.cassandra.db.filter;
 
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
@@ -53,7 +55,7 @@ public class ColumnSlice
 
     public boolean includes(Comparator<Composite> cmp, Composite name)
     {
-        return cmp.compare(start, name) <= 0 && (finish.isEmpty() || cmp.compare(finish, name) >= 0);
+        return (start.isEmpty() || cmp.compare(start, name) <= 0) && (finish.isEmpty() || cmp.compare(finish, name) >= 0);
     }
 
     public boolean isBefore(Comparator<Composite> cmp, Composite name)
@@ -106,6 +108,115 @@ public class ColumnSlice
                 return comparison;
         }
         return 0;
+    }
+
+    /**
+     * Validates that the provided slice array contains only non-overlapped slices valid for a query {@code reversed}
+     * or not on a table using {@code comparator}.
+     */
+    public static boolean validateSlices(ColumnSlice[] slices, CellNameType type, boolean reversed)
+    {
+        Comparator<Composite> comparator = reversed ? type.reverseComparator() : type;
+
+        for (int i = 0; i < slices.length; i++)
+        {
+            Composite start = slices[i].start;
+            Composite finish = slices[i].finish;
+
+            if (start.isEmpty() || finish.isEmpty())
+            {
+                if (start.isEmpty() && i > 0)
+                    return false;
+
+                if (finish.isEmpty())
+                    return i == slices.length - 1;
+            }
+            else
+            {
+                // !finish.isEmpty() is imposed by prior loop
+                if (i > 0 && comparator.compare(slices[i - 1].finish, start) >= 0)
+                    return false;
+
+                if (comparator.compare(start, finish) > 0)
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Takes an array of slices (potentially overlapping and in any order, though each individual slice must have
+     * its start before or equal its end in {@code comparator} orde) and return an equivalent array of non-overlapping
+     * slices in {@code comparator order}.
+     *
+     * @param slices an array of slices. This may be modified by this method.
+     * @param comparator the order in which to sort the slices.
+     * @return the smallest possible array of non-overlapping slices in {@code compator} order. If the original
+     * slices are already non-overlapping and in comparator order, this may or may not return the provided slices
+     * directly.
+     */
+    public static ColumnSlice[] deoverlapSlices(ColumnSlice[] slices, final Comparator<Composite> comparator)
+    {
+        if (slices.length <= 1)
+            return slices;
+
+        Arrays.sort(slices, new Comparator<ColumnSlice>()
+        {
+            @Override
+            public int compare(ColumnSlice s1, ColumnSlice s2)
+            {
+                if (s1.start.isEmpty() || s2.start.isEmpty())
+                {
+                    if (s1.start.isEmpty() != s2.start.isEmpty())
+                        return s1.start.isEmpty() ? -1 : 1;
+                }
+                else
+                {
+                    int c = comparator.compare(s1.start, s2.start);
+                    if (c != 0)
+                        return c;
+                }
+
+                // For the finish, empty always means greater
+                return s1.finish.isEmpty() || s2.finish.isEmpty()
+                     ? (s1.finish.isEmpty() ? 1 : -1)
+                     : comparator.compare(s1.finish, s2.finish);
+            }
+        });
+
+        List<ColumnSlice> slicesCopy = new ArrayList<>(slices.length);
+
+        ColumnSlice last = slices[0];
+
+        for (int i = 1; i < slices.length; i++)
+        {
+            ColumnSlice s2 = slices[i];
+
+            boolean includesStart = last.includes(comparator, s2.start);
+            boolean includesFinish = s2.finish.isEmpty() ? last.finish.isEmpty() : last.includes(comparator, s2.finish);
+
+            if (includesStart && includesFinish)
+                continue;
+
+            if (!includesStart && !includesFinish)
+            {
+                slicesCopy.add(last);
+                last = s2;
+                continue;
+            }
+
+            if (includesStart)
+            {
+                last = new ColumnSlice(last.start, s2.finish);
+                continue;
+            }
+
+            assert !includesFinish;
+        }
+
+        slicesCopy.add(last);
+
+        return slicesCopy.toArray(new ColumnSlice[slicesCopy.size()]);
     }
 
     @Override

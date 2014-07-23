@@ -52,7 +52,8 @@ public enum DataType implements OptionCodec.Codecable<DataType>
     LIST     (32, null),
     MAP      (33, null),
     SET      (34, null),
-    UDT      (48, null);
+    UDT      (48, null),
+    TUPLE    (49, null);
 
 
     public static final OptionCodec<DataType> codec = new OptionCodec<DataType>(DataType.class);
@@ -107,6 +108,12 @@ public enum DataType implements OptionCodec.Codecable<DataType>
                     fieldTypes.add(DataType.toType(codec.decodeOne(cb, version)));
                 }
                 return new UserType(ks, name, fieldNames, fieldTypes);
+            case TUPLE:
+                n = cb.readUnsignedShort();
+                List<AbstractType<?>> types = new ArrayList<>(n);
+                for (int i = 0; i < n; i++)
+                    types.add(DataType.toType(codec.decodeOne(cb, version)));
+                return new TupleType(types);
             default:
                 return null;
         }
@@ -135,12 +142,18 @@ public enum DataType implements OptionCodec.Codecable<DataType>
                 UserType udt = (UserType)value;
                 CBUtil.writeString(udt.keyspace, cb);
                 CBUtil.writeString(UTF8Type.instance.compose(udt.name), cb);
-                cb.writeShort(udt.columnNames.size());
-                for (int i = 0; i < udt.columnNames.size(); i++)
+                cb.writeShort(udt.size());
+                for (int i = 0; i < udt.size(); i++)
                 {
-                    CBUtil.writeString(UTF8Type.instance.compose(udt.columnNames.get(i)), cb);
-                    codec.writeOne(DataType.fromType(udt.types.get(i), version), cb, version);
+                    CBUtil.writeString(UTF8Type.instance.compose(udt.fieldName(i)), cb);
+                    codec.writeOne(DataType.fromType(udt.fieldType(i), version), cb, version);
                 }
+                break;
+            case TUPLE:
+                TupleType tt = (TupleType)value;
+                cb.writeShort(tt.size());
+                for (int i = 0; i < tt.size(); i++)
+                    codec.writeOne(DataType.fromType(tt.type(i), version), cb, version);
                 break;
         }
     }
@@ -166,11 +179,17 @@ public enum DataType implements OptionCodec.Codecable<DataType>
                 size += CBUtil.sizeOfString(udt.keyspace);
                 size += CBUtil.sizeOfString(UTF8Type.instance.compose(udt.name));
                 size += 2;
-                for (int i = 0; i < udt.columnNames.size(); i++)
+                for (int i = 0; i < udt.size(); i++)
                 {
-                    size += CBUtil.sizeOfString(UTF8Type.instance.compose(udt.columnNames.get(i)));
-                    size += codec.oneSerializedSize(DataType.fromType(udt.types.get(i), version), version);
+                    size += CBUtil.sizeOfString(UTF8Type.instance.compose(udt.fieldName(i)));
+                    size += codec.oneSerializedSize(DataType.fromType(udt.fieldType(i), version), version);
                 }
+                return size;
+            case TUPLE:
+                TupleType tt = (TupleType)value;
+                size = 2;
+                for (int i = 0; i < tt.size(); i++)
+                    size += codec.oneSerializedSize(DataType.fromType(tt.type(i), version), version);
                 return size;
             default:
                 return 0;
@@ -183,8 +202,9 @@ public enum DataType implements OptionCodec.Codecable<DataType>
         // shouldn't have to care about it.
         if (type instanceof ReversedType)
             type = ((ReversedType)type).baseType;
+
         // For compatibility sake, we still return DateType as the timestamp type in resultSet metadata (#5723)
-        else if (type instanceof DateType)
+        if (type instanceof DateType)
             type = TimestampType.instance;
 
         DataType dt = dataTypeMap.get(type);
@@ -211,6 +231,9 @@ public enum DataType implements OptionCodec.Codecable<DataType>
             if (type instanceof UserType && version >= 3)
                 return Pair.<DataType, Object>create(UDT, type);
 
+            if (type instanceof TupleType && version >= 3)
+                return Pair.<DataType, Object>create(TUPLE, type);
+
             return Pair.<DataType, Object>create(CUSTOM, type.toString());
         }
         else
@@ -235,6 +258,8 @@ public enum DataType implements OptionCodec.Codecable<DataType>
                     List<AbstractType> l = (List<AbstractType>)entry.right;
                     return MapType.getInstance(l.get(0), l.get(1));
                 case UDT:
+                    return (AbstractType)entry.right;
+                case TUPLE:
                     return (AbstractType)entry.right;
                 default:
                     return entry.left.type;

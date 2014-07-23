@@ -64,7 +64,6 @@ class Cql3ParsingRuleSet(CqlParsingRuleSet):
         ('min_index_interval', None),
         ('max_index_interval', None),
         ('read_repair_chance', None),
-        ('populate_io_cache_on_flush', None),
         ('default_time_to_live', None),
         ('speculative_retry', None),
         ('memtable_flush_period_in_ms', None),
@@ -74,7 +73,7 @@ class Cql3ParsingRuleSet(CqlParsingRuleSet):
         # (CQL3 option name, schema_columnfamilies column name (or None if same),
         #  list of known map keys)
         ('compaction', 'compaction_strategy_options',
-            ('class', 'max_threshold', 'tombstone_compaction_interval', 'tombstone_threshold', 'enabled')),
+            ('class', 'max_threshold', 'tombstone_compaction_interval', 'tombstone_threshold', 'enabled', 'unchecked_tombstone_compaction')),
         ('compression', 'compression_parameters',
             ('sstable_compression', 'chunk_length_kb', 'crc_check_chance')),
         ('caching', None,
@@ -435,8 +434,6 @@ def cf_prop_val_completer(ctxt, cass):
     if this_opt in ('read_repair_chance', 'bloom_filter_fp_chance',
                     'dclocal_read_repair_chance'):
         return [Hint('<float_between_0_and_1>')]
-    if this_opt in ('replicate_on_write', 'populate_io_cache_on_flush'):
-        return ["'yes'", "'no'"]
     if this_opt in ('min_compaction_threshold', 'max_compaction_threshold',
                     'gc_grace_seconds', 'min_index_interval', 'max_index_interval'):
         return [Hint('<integer>')]
@@ -598,13 +595,14 @@ syntax_rules += r'''
                           ( "WHERE" <whereClause> )?
                           ( "ORDER" "BY" <orderByClause> ( "," <orderByClause> )* )?
                           ( "LIMIT" limit=<wholenumber> )?
+                          ( "ALLOW" "FILTERING" )?
                     ;
 <whereClause> ::= <relation> ( "AND" <relation> )*
                 ;
-<relation> ::= [rel_lhs]=<cident> ( "=" | "<" | ">" | "<=" | ">=" ) <term>
+<relation> ::= [rel_lhs]=<cident> ( "=" | "<" | ">" | "<=" | ">=" | "CONTAINS" ) <term>
              | token="TOKEN" "(" [rel_tokname]=<cident>
                                  ( "," [rel_tokname]=<cident> )*
-                             ")" ("=" | "<" | ">" | "<=" | ">=") <tokenDefinition>
+                             ")" ("=" | "<" | ">" | "<=" | ">=" | "CONTAINS") <tokenDefinition>
              | [rel_lhs]=<cident> "IN" "(" <term> ( "," <term> )* ")"
              ;
 <selectClause> ::= "DISTINCT"? <selector> ("AS" <cident>)? ("," <selector> ("AS" <cident>)?)*
@@ -1004,7 +1002,13 @@ syntax_rules += r'''
 <dropColumnFamilyStatement> ::= "DROP" ( "COLUMNFAMILY" | "TABLE" ) ("IF" "EXISTS")? cf=<columnFamilyName>
                               ;
 
-<dropIndexStatement> ::= "DROP" "INDEX" ("IF" "EXISTS")? indexname=<identifier>
+<indexName> ::= ( ksname=<idxOrKsName> dot="." )? idxname=<idxOrKsName> ;
+
+<idxOrKsName> ::= <identifier>
+               | <quotedName>
+               | <unreservedKeyword>;
+
+<dropIndexStatement> ::= "DROP" "INDEX" ("IF" "EXISTS")? idx=<indexName>
                        ;
 
 <dropUserTypeStatement> ::= "DROP" "TYPE" ut=<userTypeName>
@@ -1012,9 +1016,29 @@ syntax_rules += r'''
 
 '''
 
-@completer_for('dropIndexStatement', 'indexname')
-def drop_index_completer(ctxt, cass):
-    return map(maybe_escape_name, cass.get_index_names())
+@completer_for('indexName', 'ksname')
+def idx_ks_name_completer(ctxt, cass):
+    return [maybe_escape_name(ks) + '.' for ks in cass.get_keyspace_names()]
+
+@completer_for('indexName', 'dot')
+def idx_ks_dot_completer(ctxt, cass):
+    name = dequote_name(ctxt.get_binding('ksname'))
+    if name in cass.get_keyspace_names():
+        return ['.']
+    return []
+
+@completer_for('indexName', 'idxname')
+def idx_ks_idx_name_completer(ctxt, cass):
+    ks = ctxt.get_binding('ksname', None)
+    if ks is not None:
+        ks = dequote_name(ks)
+    try:
+        idxnames = cass.get_index_names(ks)
+    except Exception:
+        if ks is None:
+            return ()
+        raise
+    return map(maybe_escape_name, idxnames)
 
 syntax_rules += r'''
 <alterTableStatement> ::= "ALTER" wat=( "COLUMNFAMILY" | "TABLE" ) cf=<columnFamilyName>
@@ -1149,7 +1173,7 @@ class UserTypesMeta(object):
                 result[ksname] = {}
             utname = row.type_name
 
-            result[ksname][utname] = zip(row.column_names, row.column_types)
+            result[ksname][utname] = zip(row.field_names, row.field_types)
         return cls(meta=result)
 
     def get_usertypes_names(self, keyspace):

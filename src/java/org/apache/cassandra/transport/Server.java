@@ -27,8 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 
-import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.util.Version;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,8 +60,8 @@ public class Server implements CassandraDaemon.Server
 
     private static final Logger logger = LoggerFactory.getLogger(Server.class);
 
-    /** current version of the native protocol we support */
-    public static final int CURRENT_VERSION = 2;
+    public static final int VERSION_3 = 3;
+    public static final int CURRENT_VERSION = VERSION_3;
 
     private final ConnectionTracker connectionTracker = new ConnectionTracker();
 
@@ -144,6 +142,7 @@ public class Server implements CassandraDaemon.Server
                                     .group(workerGroup)
                                     .channel(NioServerSocketChannel.class)
                                     .childOption(ChannelOption.TCP_NODELAY, true)
+                                    .childOption(ChannelOption.SO_KEEPALIVE, DatabaseDescriptor.getRpcKeepAlive())
                                     .childOption(ChannelOption.ALLOCATOR, CBUtil.allocator)
                                     .childOption(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 32 * 1024)
                                     .childOption(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 8 * 1024);

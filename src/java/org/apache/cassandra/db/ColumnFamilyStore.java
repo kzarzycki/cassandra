@@ -373,6 +373,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         indexManager.invalidate();
 
         CacheService.instance.invalidateRowCacheForCf(metadata.cfId);
+        CacheService.instance.invalidateKeyCacheForCf(metadata.cfId);
     }
 
     /**
@@ -462,7 +463,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         {
             public boolean accept(File pathname)
             {
-                return pathname.toString().endsWith(StreamLockfile.FILE_EXT);
+                return pathname.getPath().endsWith(StreamLockfile.FILE_EXT);
             }
         };
         for (File dir : directories.getCFDirectories())
@@ -1498,7 +1499,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private ColumnFamily getThroughCache(UUID cfId, QueryFilter filter)
     {
         assert isRowCacheEnabled()
-               : String.format("Row cache is not enabled on column family [" + name + "]");
+               : String.format("Row cache is not enabled on table [" + name + "]");
 
         RowCacheKey key = new RowCacheKey(cfId, filter.key);
 
@@ -2029,9 +2030,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public List<Row> getRangeSlice(ExtendedFilter filter)
     {
+        long start = System.nanoTime();
         try (OpOrder.Group op = readOrdering.start())
         {
             return filter(getSequentialIterator(filter.dataRange, filter.timestamp), filter);
+        }
+        finally
+        {
+            metric.rangeLatency.addNano(System.nanoTime() - start);
         }
     }
 
@@ -2144,7 +2150,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             {
                 for (SSTableReader ssTable : currentView.sstables)
                 {
-                    if (predicate != null && !predicate.apply(ssTable))
+                    if (ssTable.isOpenEarly || (predicate != null && !predicate.apply(ssTable)))
                     {
                         continue;
                     }
@@ -2668,12 +2674,12 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public double getTombstonesPerSlice()
     {
-        return metric.tombstoneScannedHistogram.getSnapshot().getMedian();
+        return metric.tombstoneScannedHistogram.cf.getSnapshot().getMedian();
     }
 
     public double getLiveCellsPerSlice()
     {
-        return metric.liveScannedHistogram.getSnapshot().getMedian();
+        return metric.liveScannedHistogram.cf.getSnapshot().getMedian();
     }
 
     // End JMX get/set.

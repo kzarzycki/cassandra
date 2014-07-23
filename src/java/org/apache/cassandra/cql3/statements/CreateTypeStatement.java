@@ -29,7 +29,7 @@ import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.MigrationManager;
-import org.apache.cassandra.transport.messages.ResultMessage;
+import org.apache.cassandra.transport.Event;
 
 public class CreateTypeStatement extends SchemaAlteringStatement
 {
@@ -50,9 +50,6 @@ public class CreateTypeStatement extends SchemaAlteringStatement
     {
         if (!name.hasKeyspace())
             name.setKeyspace(state.getKeyspace());
-
-        if (name.getKeyspace() == null)
-            throw new InvalidRequestException("You need to be logged in a keyspace or use a fully qualified user type name");
     }
 
     public void addDefinition(ColumnIdentifier name, CQL3Type.Raw type)
@@ -77,12 +74,12 @@ public class CreateTypeStatement extends SchemaAlteringStatement
 
     public static void checkForDuplicateNames(UserType type) throws InvalidRequestException
     {
-        for (int i = 0; i < type.types.size() - 1; i++)
+        for (int i = 0; i < type.size() - 1; i++)
         {
-            ByteBuffer fieldName = type.columnNames.get(i);
-            for (int j = i+1; j < type.types.size(); j++)
+            ByteBuffer fieldName = type.fieldName(i);
+            for (int j = i+1; j < type.size(); j++)
             {
-                if (fieldName.equals(type.columnNames.get(j)))
+                if (fieldName.equals(type.fieldName(j)))
                     throw new InvalidRequestException(String.format("Duplicate field name %s in type %s",
                                                                     UTF8Type.instance.getString(fieldName),
                                                                     UTF8Type.instance.getString(type.name)));
@@ -90,9 +87,9 @@ public class CreateTypeStatement extends SchemaAlteringStatement
         }
     }
 
-    public ResultMessage.SchemaChange.Change changeType()
+    public Event.SchemaChange changeEvent()
     {
-        return ResultMessage.SchemaChange.Change.UPDATED;
+        return new Event.SchemaChange(Event.SchemaChange.Change.CREATED, Event.SchemaChange.Target.TYPE, keyspace(), name.getStringTypeName());
     }
 
     @Override
@@ -114,7 +111,7 @@ public class CreateTypeStatement extends SchemaAlteringStatement
         return new UserType(name.getKeyspace(), name.getUserTypeName(), names, types);
     }
 
-    public void announceMigration() throws InvalidRequestException, ConfigurationException
+    public void announceMigration(boolean isLocalOnly) throws InvalidRequestException, ConfigurationException
     {
         KSMetaData ksm = Schema.instance.getKSMetaData(name.getKeyspace());
         assert ksm != null; // should haven't validate otherwise
@@ -125,6 +122,6 @@ public class CreateTypeStatement extends SchemaAlteringStatement
 
         UserType type = createType();
         checkForDuplicateNames(type);
-        MigrationManager.announceNewType(type);
+        MigrationManager.announceNewType(type, isLocalOnly);
     }
 }

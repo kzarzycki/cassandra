@@ -19,6 +19,8 @@ package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.google.common.primitives.Ints;
 
@@ -32,9 +34,12 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.cql3.statements.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.composites.*;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
+import org.apache.cassandra.service.pager.QueryPager;
+import org.apache.cassandra.service.pager.QueryPagers;
 import org.apache.cassandra.thrift.ThriftClientState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.messages.ResultMessage;
@@ -44,7 +49,7 @@ import org.apache.cassandra.utils.SemanticVersion;
 
 public class QueryProcessor implements QueryHandler
 {
-    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.1.6");
+    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.2.0");
 
     public static final QueryProcessor instance = new QueryProcessor();
 
@@ -73,6 +78,10 @@ public class QueryProcessor implements QueryHandler
     private static final ConcurrentLinkedHashMap<MD5Digest, ParsedStatement.Prepared> preparedStatements;
     private static final ConcurrentLinkedHashMap<Integer, CQLStatement> thriftPreparedStatements;
 
+    // A map for prepared statements used internally (which we don't want to mix with user statement, in particular we don't
+    // bother with expiration on those.
+    private static final ConcurrentMap<String, ParsedStatement.Prepared> internalStatements = new ConcurrentHashMap<>();
+
     static
     {
         preparedStatements = new ConcurrentLinkedHashMap.Builder<MD5Digest, ParsedStatement.Prepared>()
@@ -83,6 +92,34 @@ public class QueryProcessor implements QueryHandler
                                    .maximumWeightedCapacity(MAX_CACHE_PREPARED_MEMORY)
                                    .weigher(thriftMemoryUsageWeigher)
                                    .build();
+
+    }
+
+    // Work aound initialization dependency
+    private static enum InternalStateInstance
+    {
+        INSTANCE;
+
+        private final QueryState queryState;
+
+        InternalStateInstance()
+        {
+            ClientState state = ClientState.forInternalCalls();
+            try
+            {
+                state.setKeyspace(Keyspace.SYSTEM_KS);
+            }
+            catch (InvalidRequestException e)
+            {
+                throw new RuntimeException();
+            }
+            this.queryState = new QueryState(state);
+        }
+    }
+
+    private static QueryState internalQueryState()
+    {
+        return InternalStateInstance.INSTANCE.queryState;
     }
 
     private QueryProcessor()
@@ -189,16 +226,40 @@ public class QueryProcessor implements QueryHandler
         }
     }
 
-    public static UntypedResultSet processInternal(String query)
+    private static QueryOptions makeInternalOptions(ParsedStatement.Prepared prepared, Object[] values)
+    {
+        if (prepared.boundNames.size() != values.length)
+            throw new IllegalArgumentException(String.format("Invalid number of values. Expecting %d but got %d", prepared.boundNames.size(), values.length));
+
+        List<ByteBuffer> boundValues = new ArrayList<ByteBuffer>(values.length);
+        for (int i = 0; i < values.length; i++)
+        {
+            Object value = values[i];
+            AbstractType type = prepared.boundNames.get(i).type;
+            boundValues.add(value instanceof ByteBuffer || value == null ? (ByteBuffer)value : type.decompose(value));
+        }
+        return QueryOptions.forInternalCalls(boundValues);
+    }
+
+    private static ParsedStatement.Prepared prepareInternal(String query) throws RequestValidationException
+    {
+        ParsedStatement.Prepared prepared = internalStatements.get(query);
+        if (prepared != null)
+            return prepared;
+
+        // Note: if 2 threads prepare the same query, we'll live so don't bother synchronizing
+        prepared = parseStatement(query, internalQueryState());
+        prepared.statement.validate(internalQueryState().getClientState());
+        internalStatements.putIfAbsent(query, prepared);
+        return prepared;
+    }
+
+    public static UntypedResultSet executeInternal(String query, Object... values)
     {
         try
         {
-            ClientState state = ClientState.forInternalCalls();
-            QueryState qState = new QueryState(state);
-            state.setKeyspace(Keyspace.SYSTEM_KS);
-            CQLStatement statement = getStatement(query, state).statement;
-            statement.validate(state);
-            ResultMessage result = statement.executeInternal(qState);
+            ParsedStatement.Prepared prepared = prepareInternal(query);
+            ResultMessage result = prepared.statement.executeInternal(internalQueryState(), makeInternalOptions(prepared, values));
             if (result instanceof ResultMessage.Rows)
                 return UntypedResultSet.create(((ResultMessage.Rows)result).result);
             else
@@ -211,6 +272,50 @@ public class QueryProcessor implements QueryHandler
         catch (RequestValidationException e)
         {
             throw new RuntimeException("Error validating " + query, e);
+        }
+    }
+
+    public static UntypedResultSet executeInternalWithPaging(String query, int pageSize, Object... values)
+    {
+        try
+        {
+            ParsedStatement.Prepared prepared = prepareInternal(query);
+            if (!(prepared.statement instanceof SelectStatement))
+                throw new IllegalArgumentException("Only SELECTs can be paged");
+
+            SelectStatement select = (SelectStatement)prepared.statement;
+            QueryPager pager = QueryPagers.localPager(select.getPageableCommand(makeInternalOptions(prepared, values)));
+            return UntypedResultSet.create(select, pager, pageSize);
+        }
+        catch (RequestValidationException e)
+        {
+            throw new RuntimeException("Error validating query" + e);
+        }
+    }
+
+    /**
+     * Same than executeInternal, but to use for queries we know are only executed once so that the
+     * created statement object is not cached.
+     */
+    public static UntypedResultSet executeOnceInternal(String query, Object... values)
+    {
+        try
+        {
+            ParsedStatement.Prepared prepared = parseStatement(query, internalQueryState());
+            prepared.statement.validate(internalQueryState().getClientState());
+            ResultMessage result = prepared.statement.executeInternal(internalQueryState(), makeInternalOptions(prepared, values));
+            if (result instanceof ResultMessage.Rows)
+                return UntypedResultSet.create(((ResultMessage.Rows)result).result);
+            else
+                return null;
+        }
+        catch (RequestExecutionException e)
+        {
+            throw new RuntimeException(e);
+        }
+        catch (RequestValidationException e)
+        {
+            throw new RuntimeException("Error validating query " + query, e);
         }
     }
 
@@ -312,9 +417,9 @@ public class QueryProcessor implements QueryHandler
     {
         ClientState clientState = queryState.getClientState();
         batch.checkAccess(clientState);
+        batch.validate();
         batch.validate(clientState);
-        batch.execute(queryState, options);
-        return new ResultMessage.Void();
+        return batch.execute(queryState, options);
     }
 
     public static ParsedStatement.Prepared getStatement(String queryStr, ClientState clientState)
@@ -336,18 +441,21 @@ public class QueryProcessor implements QueryHandler
         try
         {
             // Lexer and parser
+            ErrorCollector errorCollector = new ErrorCollector(queryStr);
             CharStream stream = new ANTLRStringStream(queryStr);
             CqlLexer lexer = new CqlLexer(stream);
+            lexer.addErrorListener(errorCollector);
+
             TokenStream tokenStream = new CommonTokenStream(lexer);
             CqlParser parser = new CqlParser(tokenStream);
+            parser.addErrorListener(errorCollector);
 
             // Parse the query string to a statement instance
             ParsedStatement statement = parser.query();
 
-            // The lexer and parser queue up any errors they may have encountered
-            // along the way, if necessary, we turn them into exceptions here.
-            lexer.throwLastRecognitionError();
-            parser.throwLastRecognitionError();
+            // The errorCollector has queue up any errors that the lexer and parser may have encountered
+            // along the way, if necessary, we turn the last error into exceptions here.
+            errorCollector.throwFirstSyntaxError();
 
             return statement;
         }

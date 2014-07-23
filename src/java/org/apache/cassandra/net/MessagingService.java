@@ -64,6 +64,7 @@ import org.apache.cassandra.service.paxos.PrepareResponse;
 import org.apache.cassandra.tracing.TraceState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
 public final class MessagingService implements MessagingServiceMBean
 {
@@ -351,7 +352,16 @@ public final class MessagingService implements MessagingServiceMBean
                 if (expiredCallbackInfo.shouldHint())
                 {
                     Mutation mutation = (Mutation) ((WriteCallbackInfo) expiredCallbackInfo).sentMessage.payload;
-                    return StorageProxy.submitHint(mutation, expiredCallbackInfo.target, null);
+
+                    try
+                    {
+                        return StorageProxy.submitHint(mutation, expiredCallbackInfo.target, null);
+                    }
+                    finally
+                    {
+                        //We serialized a hint so we don't need this mutation anymore
+                        mutation.release();
+                    }
                 }
 
                 return null;
@@ -456,7 +466,7 @@ public final class MessagingService implements MessagingServiceMBean
             InetSocketAddress address = new InetSocketAddress(localEp, DatabaseDescriptor.getStoragePort());
             try
             {
-                socket.bind(address);
+                socket.bind(address,500);
             }
             catch (BindException e)
             {
@@ -569,6 +579,11 @@ public final class MessagingService implements MessagingServiceMBean
     {
         assert message.verb == Verb.MUTATION || message.verb == Verb.COUNTER_MUTATION;
         int messageId = nextId();
+
+        //keep the underlying buffer around till the request completes or times out and
+        //a hint is stored
+        message.payload.retain();
+
         CallbackInfo previous = callbacks.put(messageId,
                                               new WriteCallbackInfo(to,
                                                                     cb,

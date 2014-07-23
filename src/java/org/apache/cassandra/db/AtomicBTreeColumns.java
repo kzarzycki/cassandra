@@ -40,7 +40,10 @@ import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.BTreeSearchIterator;
 import org.apache.cassandra.utils.btree.UpdateFunction;
 import org.apache.cassandra.utils.concurrent.OpOrder;
+import org.apache.cassandra.utils.memory.HeapAllocator;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
+import org.apache.cassandra.utils.memory.NativeAllocator;
+import org.apache.cassandra.utils.memory.NativePool;
 
 import static org.apache.cassandra.db.index.SecondaryIndexManager.Updater;
 
@@ -170,6 +173,8 @@ public class AtomicBTreeColumns extends ColumnFamily
     public long addAllWithSizeDelta(final ColumnFamily cm, MemtableAllocator allocator, OpOrder.Group writeOp, Updater indexer)
     {
         ColumnUpdater updater = new ColumnUpdater(this, cm.metadata, allocator, writeOp, indexer);
+        DeletionInfo inputDeletionInfoCopy = null;
+
         while (true)
         {
             Holder current = ref;
@@ -179,7 +184,10 @@ public class AtomicBTreeColumns extends ColumnFamily
             DeletionInfo deletionInfo;
             if (cm.deletionInfo().mayModify(current.deletionInfo))
             {
-                deletionInfo = current.deletionInfo.copy().add(cm.deletionInfo());
+                if (inputDeletionInfoCopy == null)
+                    inputDeletionInfoCopy = cm.deletionInfo().copy(HeapAllocator.instance);
+
+                deletionInfo = current.deletionInfo.copy().add(inputDeletionInfoCopy);
                 updater.allocated(deletionInfo.unsharedHeapSize() - current.deletionInfo.unsharedHeapSize());
             }
             else
@@ -187,7 +195,7 @@ public class AtomicBTreeColumns extends ColumnFamily
                 deletionInfo = current.deletionInfo;
             }
 
-            Object[] tree = BTree.update(current.tree, metadata.comparator.columnComparator(), cm, cm.getColumnCount(), true, updater);
+            Object[] tree = BTree.update(current.tree, metadata.comparator.columnComparator(Memtable.MEMORY_POOL instanceof NativePool), cm, cm.getColumnCount(), true, updater);
 
             if (tree != null && refUpdater.compareAndSet(this, current, new Holder(tree, deletionInfo)))
             {
@@ -227,14 +235,7 @@ public class AtomicBTreeColumns extends ColumnFamily
 
     private Comparator<Object> asymmetricComparator()
     {
-        final Comparator<Composite> cmp = metadata.comparator;
-        return new Comparator<Object>()
-        {
-            public int compare(Object o1, Object o2)
-            {
-                return cmp.compare((Composite) o1, ((Cell) o2).name());
-            }
-        };
+        return metadata.comparator.asymmetricColumnComparator(Memtable.MEMORY_POOL instanceof NativePool);
     }
 
     public Iterable<CellName> getColumnNames()
@@ -345,7 +346,7 @@ public class AtomicBTreeColumns extends ColumnFamily
             indexer.insert(insert);
             insert = insert.localCopy(metadata, allocator, writeOp);
             this.dataSize += insert.cellDataSize();
-            this.heapSize += insert.excessHeapSizeExcludingData();
+            this.heapSize += insert.unsharedHeapSizeExcludingData();
             if (inserted == null)
                 inserted = new ArrayList<>();
             inserted.add(insert);
@@ -360,7 +361,7 @@ public class AtomicBTreeColumns extends ColumnFamily
             {
                 reconciled = reconciled.localCopy(metadata, allocator, writeOp);
                 dataSize += reconciled.cellDataSize() - existing.cellDataSize();
-                heapSize += reconciled.excessHeapSizeExcludingData() - existing.excessHeapSizeExcludingData();
+                heapSize += reconciled.unsharedHeapSizeExcludingData() - existing.unsharedHeapSizeExcludingData();
                 if (inserted == null)
                     inserted = new ArrayList<>();
                 inserted.add(reconciled);

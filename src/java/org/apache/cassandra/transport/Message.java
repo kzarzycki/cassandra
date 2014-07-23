@@ -17,9 +17,16 @@
  */
 package org.apache.cassandra.transport;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
@@ -103,6 +110,8 @@ public abstract class Message
 
         public static Type fromOpcode(int opcode, Direction direction)
         {
+            if (opcode >= opcodeIdx.length)
+                throw new ProtocolException(String.format("Unknown opcode %d", opcode));
             Type t = opcodeIdx[opcode];
             if (t == null)
                 throw new ProtocolException(String.format("Unknown opcode %d", opcode));
@@ -117,9 +126,9 @@ public abstract class Message
     }
 
     public final Type type;
-    protected volatile Connection connection;
-    private volatile int streamId;
-    private volatile Frame sourceFrame;
+    protected Connection connection;
+    private int streamId;
+    private Frame sourceFrame = null;
 
     protected Message(Type type)
     {
@@ -261,47 +270,133 @@ public abstract class Message
             EnumSet<Frame.Header.Flag> flags = EnumSet.noneOf(Frame.Header.Flag.class);
 
             Codec<Message> codec = (Codec<Message>)message.type.codec;
-            int messageSize = codec.encodedSize(message, version);
-            ByteBuf body;
-            if (message instanceof Response)
+            try
             {
-                UUID tracingId = ((Response)message).getTracingId();
-                if (tracingId != null)
+                int messageSize = codec.encodedSize(message, version);
+                ByteBuf body;
+                if (message instanceof Response)
                 {
-                    body = CBUtil.allocator.buffer(CBUtil.sizeOfUUID(tracingId) + messageSize);
-                    CBUtil.writeUUID(tracingId, body);
-                    flags.add(Frame.Header.Flag.TRACING);
+                    UUID tracingId = ((Response)message).getTracingId();
+                    if (tracingId != null)
+                    {
+                        body = CBUtil.allocator.buffer(CBUtil.sizeOfUUID(tracingId) + messageSize);
+                        CBUtil.writeUUID(tracingId, body);
+                        flags.add(Frame.Header.Flag.TRACING);
+                    }
+                    else
+                    {
+                        body = CBUtil.allocator.buffer(messageSize);
+                    }
                 }
                 else
                 {
+                    assert message instanceof Request;
                     body = CBUtil.allocator.buffer(messageSize);
+                    if (((Request)message).isTracingRequested())
+                        flags.add(Frame.Header.Flag.TRACING);
                 }
-            }
-            else
-            {
-                assert message instanceof Request;
-                body = CBUtil.allocator.buffer(messageSize);
-                if (((Request)message).isTracingRequested())
-                    flags.add(Frame.Header.Flag.TRACING);
-            }
 
-            try
-            {
-                codec.encode(message, body, version);
+                try
+                {
+                    codec.encode(message, body, version);
+                }
+                catch (Throwable e)
+                {
+                    body.release();
+                    throw e;
+                }
+
+                results.add(Frame.create(message.type, message.getStreamId(), version, flags, body));
             }
             catch (Throwable e)
             {
-                body.release();
                 throw ErrorMessage.wrap(e, message.getStreamId());
             }
-
-            results.add(Frame.create(message.type, message.getStreamId(), version, flags, body));
         }
     }
 
     @ChannelHandler.Sharable
     public static class Dispatcher extends SimpleChannelInboundHandler<Request>
     {
+        private static class FlushItem
+        {
+            final ChannelHandlerContext ctx;
+            final Response response;
+            private FlushItem(ChannelHandlerContext ctx, Response response)
+            {
+                this.ctx = ctx;
+                this.response = response;
+            }
+        }
+
+        private final class Flusher implements Runnable
+        {
+            final EventLoop eventLoop;
+            final ConcurrentLinkedQueue<FlushItem> queued = new ConcurrentLinkedQueue<>();
+            final AtomicBoolean running = new AtomicBoolean(false);
+            final HashSet<ChannelHandlerContext> channels = new HashSet<>();
+            final List<FlushItem> flushed = new ArrayList<>();
+            int runsSinceFlush = 0;
+            int runsWithNoWork = 0;
+            private Flusher(EventLoop eventLoop)
+            {
+                this.eventLoop = eventLoop;
+            }
+            void start()
+            {
+                if (!running.get() && running.compareAndSet(false, true))
+                {
+                    this.eventLoop.execute(this);
+                }
+            }
+            public void run()
+            {
+
+                boolean doneWork = false;
+                FlushItem flush;
+                while ( null != (flush = queued.poll()) )
+                {
+                    channels.add(flush.ctx);
+                    flush.ctx.write(flush.response, flush.ctx.voidPromise());
+                    flushed.add(flush);
+                    doneWork = true;
+                }
+
+                runsSinceFlush++;
+
+                if (!doneWork || runsSinceFlush > 2 || flushed.size() > 50)
+                {
+                    for (ChannelHandlerContext channel : channels)
+                        channel.flush();
+                    for (FlushItem item : flushed)
+                        item.response.getSourceFrame().release();
+
+                    channels.clear();
+                    flushed.clear();
+                    runsSinceFlush = 0;
+                }
+
+                if (doneWork)
+                {
+                    runsWithNoWork = 0;
+                }
+                else
+                {
+                    // either reschedule or cancel
+                    if (++runsWithNoWork > 5)
+                    {
+                        running.set(false);
+                        if (queued.isEmpty() || !running.compareAndSet(false, true))
+                            return;
+                    }
+                }
+
+                eventLoop.schedule(this, 10000, TimeUnit.NANOSECONDS);
+            }
+        }
+
+        private static final ConcurrentMap<EventLoop, Flusher> flusherLookup = new ConcurrentHashMap<>();
+
         public Dispatcher()
         {
             super(false);
@@ -310,32 +405,46 @@ public abstract class Message
         @Override
         public void channelRead0(ChannelHandlerContext ctx, Request request)
         {
+
+            final Response response;
+            final ServerConnection connection;
+
             try
             {
                 assert request.connection() instanceof ServerConnection;
-                ServerConnection connection = (ServerConnection)request.connection();
+                connection = (ServerConnection)request.connection();
                 QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion(), request.getStreamId());
+                qstate.setSourceFrame(request.getSourceFrame());
 
                 logger.debug("Received: {}, v={}", request, connection.getVersion());
 
-                Response response = request.execute(qstate);
+                response = request.execute(qstate);
                 response.setStreamId(request.getStreamId());
                 response.attach(connection);
                 response.setSourceFrame(request.getSourceFrame());
                 connection.applyStateTransition(request.type, response.type);
-
-                logger.debug("Responding: {}, v={}", response, connection.getVersion());
-
-                ctx.writeAndFlush(response, ctx.voidPromise());
             }
             catch (Throwable ex)
             {
+                request.getSourceFrame().release();
                 // Don't let the exception propagate to exceptionCaught() if we can help it so that we can assign the right streamID.
                 ctx.writeAndFlush(ErrorMessage.fromException(ex).setStreamId(request.getStreamId()), ctx.voidPromise());
+                return;
             }
-            finally {
-                request.getSourceFrame().release();
+
+            logger.debug("Responding: {}, v={}", response, connection.getVersion());
+
+            EventLoop loop = ctx.channel().eventLoop();
+            Flusher flusher = flusherLookup.get(loop);
+            if (flusher == null)
+            {
+                Flusher alt = flusherLookup.putIfAbsent(loop, flusher = new Flusher(loop));
+                if (alt != null)
+                    flusher = alt;
             }
+
+            flusher.queued.add(new FlushItem(ctx, response));
+            flusher.start();
         }
 
         @Override

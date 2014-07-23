@@ -399,7 +399,7 @@ public class CassandraServer implements Cassandra.Iface
             if (metadata.isSuper())
             {
                 CellNameType columnType = new SimpleDenseCellNameType(metadata.comparator.subtype(parent.isSetSuper_column() ? 1 : 0));
-                SortedSet<CellName> s = new TreeSet<CellName>(columnType);
+                SortedSet<CellName> s = new TreeSet<>(columnType);
                 for (ByteBuffer bb : predicate.column_names)
                     s.add(columnType.cellFromByteBuffer(bb));
                 filter = SuperColumns.fromSCNamesFilter(metadata.comparator, parent.bufferForSuper_column(), new NamesQueryFilter(s));
@@ -549,7 +549,7 @@ public class CassandraServer implements Cassandra.Iface
             if (cfs.getMeanColumns() > 0)
             {
                 int averageColumnSize = (int) (cfs.getMeanRowSize() / cfs.getMeanColumns());
-                pageSize = Math.min(COUNT_PAGE_SIZE, DatabaseDescriptor.getInMemoryCompactionLimit() / averageColumnSize);
+                pageSize = Math.min(COUNT_PAGE_SIZE, 4 * 1024 * 1024 / averageColumnSize);
                 pageSize = Math.max(2, pageSize);
                 logger.debug("average row column size is {}; using pageSize of {}", averageColumnSize, pageSize);
             }
@@ -1636,7 +1636,7 @@ public class CassandraServer implements Cassandra.Iface
             state().hasKeyspaceAccess(ks_def.name, Permission.ALTER);
             ThriftValidation.validateKeyspace(ks_def.name);
             if (ks_def.getCf_defs() != null && ks_def.getCf_defs().size() > 0)
-                throw new InvalidRequestException("Keyspace update must not contain any column family definitions.");
+                throw new InvalidRequestException("Keyspace update must not contain any table definitions.");
 
             MigrationManager.announceKeyspaceUpdate(KSMetaData.fromThrift(ks_def));
             return Schema.instance.getVersion().toString();
@@ -1661,7 +1661,7 @@ public class CassandraServer implements Cassandra.Iface
             CFMetaData oldCfm = Schema.instance.getCFMetaData(cf_def.keyspace, cf_def.name);
 
             if (oldCfm == null)
-                throw new InvalidRequestException("Could not find column family definition to modify.");
+                throw new InvalidRequestException("Could not find table definition to modify.");
 
             if (!oldCfm.isThriftCompatible())
                 throw new InvalidRequestException("Cannot modify CQL3 table " + oldCfm.cfName + " as it may break the schema. You should use cqlsh to modify CQL3 tables instead.");
@@ -2031,20 +2031,24 @@ public class CassandraServer implements Cassandra.Iface
             org.apache.cassandra.db.ConsistencyLevel consistencyLevel = ThriftConversion.fromThrift(request.getConsistency_level());
             consistencyLevel.validateForRead(keyspace);
             List<ReadCommand> commands = new ArrayList<>(1);
-            ColumnSlice [] slices = new ColumnSlice[request.getColumn_slices().size()];
+            ColumnSlice[] slices = new ColumnSlice[request.getColumn_slices().size()];
             for (int i = 0 ; i < request.getColumn_slices().size() ; i++)
             {
                 fixOptionalSliceParameters(request.getColumn_slices().get(i));
                 Composite start = metadata.comparator.fromByteBuffer(request.getColumn_slices().get(i).start);
                 Composite finish = metadata.comparator.fromByteBuffer(request.getColumn_slices().get(i).finish);
-                int compare = metadata.comparator.compare(start, finish);
-                if (!request.reversed && compare > 0)
-                    throw new InvalidRequestException(String.format("Column slice at index %d had start greater than finish", i));
-                else if (request.reversed && compare < 0)
-                    throw new InvalidRequestException(String.format("Reversed column slice at index %d had start less than finish", i));
+                if (!start.isEmpty() && !finish.isEmpty())
+                {
+                    int compare = metadata.comparator.compare(start, finish);
+                    if (!request.reversed && compare > 0)
+                        throw new InvalidRequestException(String.format("Column slice at index %d had start greater than finish", i));
+                    else if (request.reversed && compare < 0)
+                        throw new InvalidRequestException(String.format("Reversed column slice at index %d had start less than finish", i));
+                }
                 slices[i] = new ColumnSlice(start, finish);
             }
-            SliceQueryFilter filter = new SliceQueryFilter(slices, request.reversed, request.count);
+            ColumnSlice[] deoverlapped = ColumnSlice.deoverlapSlices(slices, request.reversed ? metadata.comparator.reverseComparator() : metadata.comparator);
+            SliceQueryFilter filter = new SliceQueryFilter(deoverlapped, request.reversed, request.count);
             ThriftValidation.validateKey(metadata, request.key);
             commands.add(ReadCommand.create(keyspace, request.key, request.column_parent.getColumn_family(), System.currentTimeMillis(), filter));
             return getSlice(commands, request.column_parent.isSetSuper_column(), consistencyLevel).entrySet().iterator().next().getValue();
